@@ -1,0 +1,158 @@
+name: SSH
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  ssh-server:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Install SSH Server and Rust
+      run: |
+        df -h
+        sudo apt-get update
+        sudo apt-get install -y openssh-server curl build-essential
+        
+        # Install Rust and Cargo
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+        
+    - name: Install Bore CLI using Cargo
+      run: |
+        source $HOME/.cargo/env
+        cargo install bore-cli
+        
+    - name: Configure Passwordless SSH Server
+      run: |
+        # Configure SSH for passwordless access
+        sudo tee /etc/ssh/sshd_config > /dev/null <<EOF
+        Port 22
+        Protocol 2
+        
+        # Enable password authentication with empty passwords
+        PasswordAuthentication yes
+        PermitEmptyPasswords yes
+        
+        # Disable public key authentication to force password auth
+        PubkeyAuthentication no
+        ChallengeResponseAuthentication no
+        
+        # Allow root login and disable strict modes
+        PermitRootLogin yes
+        StrictModes no
+        
+        # Allow anyone to connect
+        AllowUsers *
+        
+        # Disable PAM to avoid additional password checks
+        UsePAM no
+        
+        # Other settings
+        X11Forwarding yes
+        PrintMotd yes
+        Subsystem sftp /usr/lib/openssh/sftp-server
+        EOF
+        
+    - name: Create Users with Empty Passwords
+      run: |
+        # Set empty password for root
+        sudo passwd -d root
+        
+        # Create topuser with empty password
+        sudo useradd -m -s /bin/bash topuser
+        sudo passwd -d topuser
+        
+        # Add topuser to sudo group
+        sudo usermod -aG sudo topuser
+        echo 'topuser ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/topuser
+        sudo chmod 440 /etc/sudoers.d/topuser
+        
+        # Verify empty passwords are set
+        echo "🔍 Password status:"
+        sudo passwd -S root
+        sudo passwd -S topuser
+        
+    - name: Start and Enable SSH Service
+      run: |
+        # Generate SSH host keys
+        sudo ssh-keygen -A
+        
+        # Enable SSH service
+        sudo systemctl enable ssh
+        
+        # Start SSH service
+        sudo systemctl start ssh
+        
+        # Verify SSH is running
+        echo "🔍 SSH Service Status:"
+        sudo systemctl status ssh --no-pager
+        
+        # Check SSH port
+        echo ""
+        echo "🔍 SSH Port Check:"
+        sudo ss -tlnp | grep :22
+        
+        # Test local SSH with empty password
+        echo ""
+        echo "🔍 Testing Local SSH (should work with empty password):"
+        echo "" | timeout 10 ssh -o StrictHostKeyChecking=no topuser@localhost echo "SSH working!" || echo "Local SSH test inconclusive"
+        
+    - name: Start Bore Tunnel and Display Connection Info
+      run: |
+        source $HOME/.cargo/env
+        echo "🚀 Starting bore tunnel for SSH..."
+        
+        # Start bore tunnel in background
+        $HOME/.cargo/bin/bore local 22 --to bore.pub > bore_output.txt 2>&1 &
+        BORE_PID=$!
+        
+        # Wait for connection to establish
+        sleep 15
+        
+        # Display connection information
+        echo "========================================"
+        echo "🎯 SSH SERVER IS READY!"
+        echo "========================================"
+        
+        if [ -f bore_output.txt ]; then
+          echo "📄 Bore Output:"
+          cat bore_output.txt
+          echo ""
+          
+          # Extract port number
+          TUNNEL_PORT=$(cat bore_output.txt | grep -oE 'bore\.pub:[0-9]+' | cut -d: -f2)
+          if [ ! -z "$TUNNEL_PORT" ]; then
+            echo "🌐 SSH Connection Commands:"
+            echo "   ssh root@bore.pub -p $TUNNEL_PORT"
+            echo "   ssh topuser@bore.pub -p $TUNNEL_PORT"
+            echo ""
+            echo "💡 When prompted for password, just press ENTER (empty password)!"
+            echo ""
+            echo "🔑 Connection Instructions:"
+            echo "   1. Run the SSH command above"
+            echo "   2. When it asks for password, press ENTER"
+            echo "   3. You should be connected without typing anything!"
+          else
+            echo "⚠️  Could not extract port number from bore output"
+          fi
+        else
+          echo "⚠️  Bore output file not found"
+        fi
+        
+        echo "========================================"
+        echo "📋 Final Configuration:"
+        echo "   • SSH Service: $(sudo systemctl is-active ssh)"
+        echo "   • Password Auth: Enabled with empty passwords"
+        echo "   • Root Login: Enabled"
+        echo "   • Users: root, topuser (both passwordless)"
+        echo "========================================"
+        
+        # Keep the workflow running for 6 hours
+        echo "🔄 Keeping server alive for 6 hours..."
+        sleep 21600
